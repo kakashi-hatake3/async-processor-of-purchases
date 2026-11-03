@@ -1,0 +1,101 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: payments_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: payments_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d payments_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - payments_net
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: payments_rabbitmq
+    restart: unless-stopped
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q check_port_connectivity || exit 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 6
+      start_period: 10s
+    networks:
+      - payments_net
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: payments_app:latest
+    container_name: payments_api
+    restart: unless-stopped
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/payments_db
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      API_KEY: test-secret-api-key-12345
+      APP_ENV: production
+      DEBUG: "false"
+      OUTBOX_POLL_INTERVAL: "2.0"
+      OUTBOX_BATCH_SIZE: "50"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - payments_net
+
+  consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: payments_app:latest
+    container_name: payments_consumer
+    restart: unless-stopped
+    command: python -m app.worker
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/payments_db
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      API_KEY: test-secret-api-key-12345
+      APP_ENV: production
+      DEBUG: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      api:
+        condition: service_started
+    networks:
+      - payments_net
+
+volumes:
+  postgres_data:
+  rabbitmq_data:
+
+networks:
+  payments_net:
+    driver: bridge
